@@ -3,23 +3,57 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
+        # Классика
         [InlineKeyboardButton(text="🎰 Слоты", callback_data="slots"),
          InlineKeyboardButton(text="🎡 Рулетка", callback_data="roulette")],
         [InlineKeyboardButton(text="🎲 Кости", callback_data="dice"),
          InlineKeyboardButton(text="🪙 Монетка", callback_data="coin")],
-        [InlineKeyboardButton(text="🃏 Блэкджек", callback_data="bj"),
-         InlineKeyboardButton(text="💣 Мины", callback_data="mines")],
-        [InlineKeyboardButton(text="🃏 Покер", callback_data="poker"),
-         InlineKeyboardButton(text="👥 Дуэли", callback_data="duel")],
-        [InlineKeyboardButton(text="🎡 Колесо фортуны", callback_data="wheel"),
-         InlineKeyboardButton(text="📊 График", callback_data="graph")],
+        [InlineKeyboardButton(text="💣 Мины", callback_data="mines"),
+         InlineKeyboardButton(text="🎡 Колесо", callback_data="wheel")],
+
+        # 🆕 Спортивные
+        [InlineKeyboardButton(text="🎯 Дартс", callback_data="darts"),
+         InlineKeyboardButton(text="⚽ Футбол", callback_data="football")],
+        [InlineKeyboardButton(text="🏀 Баскетбол", callback_data="basket"),
+         InlineKeyboardButton(text="🎳 Боулинг", callback_data="bowling")],
+        [InlineKeyboardButton(text="🎰 Слот-машина", callback_data="slot_dice")],
+
+        # Информация
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
          InlineKeyboardButton(text="🏆 Топ", callback_data="top")],
         [InlineKeyboardButton(text="🎯 Квесты", callback_data="quests"),
          InlineKeyboardButton(text="🏅 Ачивки", callback_data="achievements")],
-        [InlineKeyboardButton(text="🎁 Бонус", callback_data="daily")],
         [InlineKeyboardButton(text="💎 Магазин", callback_data="shop")],
+        [InlineKeyboardButton(text="🎁 Бонус", callback_data="daily")],
     ])
+
+
+def sport_choice(game):
+    """Меню выбора для спортивных игр"""
+    choices = {
+        'darts': [
+            ("🎯 В яблочко (x5)", f"sport_darts_center"),
+            ("🎯 Внутренний круг (x2)", f"sport_darts_middle"),
+            ("🎯 В мишень (x1.5)", f"sport_darts_any"),
+        ],
+        'football': [
+            ("⚽ Гол (x1.9-4)", f"sport_football_goal"),
+            ("⚽ В девятку (x4)", f"sport_football_topcorner"),
+        ],
+        'basket': [
+            ("🏀 Бросок (x1.9-4.5)", f"sport_basket_shot"),
+            ("🏀 Трёхочковый (x4.5)", f"sport_basket_three"),
+        ],
+        'bowling': [
+            ("🎳 Страйк (x5)", f"sport_bowling_strike"),
+            ("🎳 Любое попадание", f"sport_bowling_any"),
+        ],
+    }
+    rows = []
+    for text, cb in choices.get(game, []):
+        rows.append([InlineKeyboardButton(text=text, callback_data=cb)])
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def back_menu():
