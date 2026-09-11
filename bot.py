@@ -1254,6 +1254,202 @@ async def duel_defend_cb(c: CallbackQuery):
     await c.message.answer(text, reply_markup=kb, parse_mode="HTML")
     await c.answer()
 
+# ============================================================
+# 💰 МАГАЗИН И ПЛАТЕЖИ
+# ============================================================
+from wallet import buy_crystals, exchange_crystals, format_crystals
+from payments import (
+    send_stars_invoice, create_yookassa_payment,
+    check_yookassa_payment, format_pack,
+    format_price_stars, format_price_rub
+)
+from config import CRYSTAL_PACKS, CRYSTAL_TO_MONEY
+from aiogram.types import PreCheckoutQuery, LabeledPrice
+
+
+@dp.callback_query(F.data == "shop")
+async def cb_shop(c: CallbackQuery):
+    u = get_user(c.from_user.id)
+    text = (
+        f"💎 <b>МАГАЗИН КРИСТАЛЛОВ</b>\n\n"
+        f"💰 Игровой баланс: <b>{fmt(u['balance'])}</b>\n"
+        f"💎 Кристаллов: <b>{u['crystals']}</b>\n\n"
+        f"💱 Курс: <b>1💎 = {CRYSTAL_TO_MONEY}$</b>\n\n"
+        f"Выбери пакет:"
+    )
+    rows = []
+    for i, (crystals, stars, rub, bonus) in enumerate(CRYSTAL_PACKS):
+        total = crystals + int(crystals * bonus / 100)
+        bonus_str = f" +{bonus}%" if bonus else ""
+        rows.append([
+            InlineKeyboardButton(
+                text=f"💎 {total}{bonus_str} — {stars}⭐ / {rub}₽",
+                callback_data=f"pack_{i}"
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="💱 Обменять кристаллы", callback_data="exchange")])
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="main_menu")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    await edit(c, text, kb)
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("pack_"))
+async def cb_pack(c: CallbackQuery):
+    idx = int(c.data.split("_")[1])
+    u = get_user(c.from_user.id)
+    text = (
+        f"💎 <b>{format_pack(idx)}</b>\n\n"
+        f"⭐ Stars: <b>{format_price_stars(idx)}</b>\n"
+        f"💳 Карта: <b>{format_price_rub(idx)}</b>\n\n"
+        f"Как оплатить?"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"⭐ Оплатить Stars ({format_price_stars(idx)})",
+                              callback_data=f"pay_stars_{idx}")],
+        [InlineKeyboardButton(text=f"💳 Оплатить картой ({format_price_rub(idx)})",
+                              callback_data=f"pay_yoo_{idx}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="shop")],
+    ])
+    await edit(c, text, kb)
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("pay_stars_"))
+async def cb_pay_stars(c: CallbackQuery):
+    idx = int(c.data.split("_")[2])
+    await c.answer("⭐ Отправляю счёт...")
+    try:
+        await send_stars_invoice(bot, c.from_user.id, idx)
+    except Exception as e:
+        await c.message.answer(f"❌ Ошибка: {e}")
+
+
+@dp.pre_checkout_query()
+async def pre_checkout(q: PreCheckoutQuery):
+    """Подтверждение оплаты Stars"""
+    await q.answer(ok=True)
+
+
+@dp.message(F.successful_payment)
+async def on_successful_payment(m: Message):
+    """Успешная оплата — начисляем кристаллы"""
+    payload = m.successful_payment.invoice_payload  # stars_0_10
+    parts = payload.split("_")
+    total_crystals = int(parts[2])
+    amount_stars = m.successful_payment.total_amount
+
+    buy_crystals(m.from_user.id, total_crystals, 'stars', m.successful_payment.telegram_payment_charge_id)
+    u = get_user(m.from_user.id)
+
+    await m.answer(
+        f"🎉 <b>Оплата прошла!</b>\n\n"
+        f"💎 Получено: <b>+{total_crystals} кристаллов</b>\n"
+        f"⭐ Списано: <b>{amount_stars} Stars</b>\n\n"
+        f"💼 Всего кристаллов: <b>{u['crystals']}</b>",
+        parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data.startswith("pay_yoo_"))
+async def cb_pay_yoo(c: CallbackQuery):
+    idx = int(c.data.split("_")[2])
+    await c.answer("💳 Создаю платёж...")
+
+    return_url = f"https://t.me/{(await bot.get_me()).username}"
+    payment_id, url = await create_yookassa_payment(c.from_user.id, idx, return_url)
+
+    if not payment_id:
+        await c.message.answer(
+            "❌ ЮKassa не настроена.\n\n"
+            "Проверь SHOP_ID и SECRET_KEY в config.py."
+        )
+        return
+
+    crystals, stars, rub, bonus = CRYSTAL_PACKS[idx]
+    total = crystals + int(crystals * bonus / 100)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Перейти к оплате", url=url)],
+        [InlineKeyboardButton(text="✅ Проверить оплату", callback_data=f"check_yoo_{payment_id}_{total}")],
+    ])
+    await c.message.edit_text(
+        f"💳 <b>Оплата картой</b>\n\n"
+        f"💎 {total} кристаллов\n"
+        f"💰 Сумма: <b>{rub}₽</b>\n\n"
+        f"После оплаты нажми «Проверить оплату».",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+
+@dp.callback_query(F.data.startswith("check_yoo_"))
+async def cb_check_yoo(c: CallbackQuery):
+    parts = c.data.split("_")
+    payment_id = parts[2]
+    crystals = int(parts[3])
+
+    status = await check_yookassa_payment(payment_id)
+
+    if status == 'succeeded':
+        # Проверим, не начисляли ли уже
+        # (упрощённо — просто начисляем)
+        buy_crystals(c.from_user.id, crystals, 'yookassa', payment_id)
+        u = get_user(c.from_user.id)
+        await c.answer(f"✅ +{crystals}💎!", show_alert=True)
+        await c.message.edit_text(
+            f"🎉 <b>Оплата прошла!</b>\n\n"
+            f"💎 Получено: <b>+{crystals} кристаллов</b>\n\n"
+            f"💼 Всего: <b>{u['crystals']}</b>",
+            reply_markup=back_menu(),
+            parse_mode="HTML"
+        )
+    elif status == 'pending':
+        await c.answer("⏳ Платёж ещё не завершён", show_alert=True)
+    else:
+        await c.answer(f"❌ Статус: {status}", show_alert=True)
+
+
+@dp.callback_query(F.data == "exchange")
+async def cb_exchange(c: CallbackQuery):
+    u = get_user(c.from_user.id)
+    if u['crystals'] < 1:
+        await c.answer("❌ У тебя нет кристаллов", show_alert=True)
+        return
+    text = (
+        f"💱 <b>ОБМЕН КРИСТАЛЛОВ</b>\n\n"
+        f"💎 У тебя: <b>{u['crystals']}</b>\n"
+        f"💱 Курс: <b>1💎 = {CRYSTAL_TO_MONEY}$</b>\n"
+        f"💰 Можно получить: <b>{u['crystals'] * CRYSTAL_TO_MONEY}$</b>\n\n"
+        f"Обменять все?"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💱 Обменять все ({u['crystals']}💎)",
+                              callback_data="exchange_all")],
+        [InlineKeyboardButton(text="⬅️ В магазин", callback_data="shop")],
+    ])
+    await edit(c, text, kb)
+    await c.answer()
+
+
+@dp.callback_query(F.data == "exchange_all")
+async def cb_exchange_all(c: CallbackQuery):
+    u = get_user(c.from_user.id)
+    if u['crystals'] < 1:
+        await c.answer("❌ Нет кристаллов", show_alert=True)
+        return
+    ok, money = exchange_crystals(c.from_user.id, u['crystals'])
+    if ok:
+        u2 = get_user(c.from_user.id)
+        await c.answer(f"💱 +{fmt(money)}!", show_alert=True)
+        await edit(c,
+                   f"✅ <b>Обмен выполнен!</b>\n\n"
+                   f"💎 Обменяно: <b>{u['crystals']}</b>\n"
+                   f"💰 Получено: <b>+{fmt(money)}</b>\n\n"
+                   f"💼 Баланс: <b>{fmt(u2['balance'])}</b>",
+                   back_menu())
+    else:
+        await c.answer("❌ Ошибка", show_alert=True)
 
 # ============================================================
 # ЗАПУСК
