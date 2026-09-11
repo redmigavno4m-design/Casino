@@ -7,8 +7,13 @@ def main_menu():
          InlineKeyboardButton(text="🎡 Рулетка", callback_data="roulette")],
         [InlineKeyboardButton(text="🎲 Кости", callback_data="dice"),
          InlineKeyboardButton(text="🪙 Монетка", callback_data="coin")],
+        [InlineKeyboardButton(text="🃏 Блэкджек", callback_data="bj"),
+         InlineKeyboardButton(text="💣 Мины", callback_data="mines")],
+        [InlineKeyboardButton(text="🎡 Колесо фортуны", callback_data="wheel")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
          InlineKeyboardButton(text="🏆 Топ", callback_data="top")],
+        [InlineKeyboardButton(text="🎯 Квесты", callback_data="quests"),
+         InlineKeyboardButton(text="🏅 Ачивки", callback_data="achievements")],
         [InlineKeyboardButton(text="🎁 Бонус", callback_data="daily")],
     ])
 
@@ -33,4 +38,31 @@ def bet_menu(game, balance):
     if not bets:
         rows.append([InlineKeyboardButton(text="Нет средств", callback_data="noop")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def bj_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Взять", callback_data="bj_hit"),
+         InlineKeyboardButton(text="✋ Стоп", callback_data="bj_stand")],
+    ])
+
+
+def mines_grid_buttons(game_id, opened, mines_positions, grid_size=5):
+    """Создаёт сетку кнопок для мин."""
+    rows = []
+    row = []
+    for i in range(grid_size * grid_size):
+        if i in opened:
+            symbol = "💎"
+        elif i in mines_positions and game_id.get('finished'):
+            symbol = "💣"
+        else:
+            symbol = "⬜"
+        row.append(InlineKeyboardButton(text=symbol, callback_data=f"mines_open_{i}"))
+        if len(row) == grid_size:
+            rows.append(row)
+            row = []
+    rows.append([InlineKeyboardButton(text="💰 Забрать", callback_data="mines_cashout")])
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
