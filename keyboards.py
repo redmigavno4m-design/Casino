@@ -18,6 +18,7 @@ def main_menu():
         [InlineKeyboardButton(text="🎯 Квесты", callback_data="quests"),
          InlineKeyboardButton(text="🏅 Ачивки", callback_data="achievements")],
         [InlineKeyboardButton(text="🎁 Бонус", callback_data="daily")],
+        [InlineKeyboardButton(text="💎 Магазин", callback_data="shop")],
     ])
 
 
