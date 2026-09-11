@@ -9,7 +9,6 @@ def init_db():
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
 
-    # Основная таблица
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -34,11 +33,11 @@ def init_db():
             referrer_id INTEGER DEFAULT 0,
             referrals INTEGER DEFAULT 0,
             referral_earnings INTEGER DEFAULT 0,
-            banned INTEGER DEFAULT 0
+            banned INTEGER DEFAULT 0,
+            created_at INTEGER DEFAULT (strftime('%s','now'))
         )
     """)
 
-    # Транзакции
     cur.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,26 +51,23 @@ def init_db():
         )
     """)
 
-    # Лотерея
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS lottery (
+        CREATE TABLE IF NOT EXISTS withdrawals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
-            ticket_count INTEGER,
-            draw_id INTEGER
+            crystals INTEGER,
+            payout_rub REAL,
+            payout_usdt REAL,
+            method TEXT,
+            wallet TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at INTEGER,
+            processed_at INTEGER,
+            admin_id INTEGER,
+            comment TEXT
         )
     """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS lottery_draws (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            jackpot INTEGER,
-            winner_id INTEGER,
-            drawn_at INTEGER
-        )
-    """)
-
-    # Турниры
     cur.execute("""
         CREATE TABLE IF NOT EXISTS tournaments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,6 +87,23 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS promos (
+            code TEXT PRIMARY KEY,
+            amount INTEGER,
+            uses INTEGER,
+            used INTEGER DEFAULT 0
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS promo_uses (
+            user_id INTEGER,
+            code TEXT,
+            PRIMARY KEY (user_id, code)
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -101,10 +114,8 @@ def get_user(user_id, username=None, first_name=None):
     cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
     row = cur.fetchone()
     if not row:
-        cur.execute(
-            "INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
-            (user_id, username, first_name)
-        )
+        cur.execute("INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
+                    (user_id, username, first_name))
         conn.commit()
         cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
         row = cur.fetchone()
@@ -120,9 +131,7 @@ def get_user(user_id, username=None, first_name=None):
         'daily_quests': json.loads(row[16]) if row[16] else {},
         'quests_date': row[17],
         'language': row[18],
-        'referrer_id': row[19],
-        'referrals': row[20],
-        'referral_earnings': row[21],
+        'referrer_id': row[19], 'referrals': row[20], 'referral_earnings': row[21],
         'banned': row[22]
     }
 
@@ -146,44 +155,29 @@ def update_crystals(user_id, delta):
 def add_transaction(user_id, amount, currency, method, status='pending', ext_id=None):
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO transactions (user_id, amount, currency, method, status, ext_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user_id, amount, currency, method, status, ext_id, int(time.time()))
-    )
+    cur.execute("""INSERT INTO transactions
+                   (user_id, amount, currency, method, status, ext_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (user_id, amount, currency, method, status, ext_id, int(time.time())))
     tx_id = cur.lastrowid
     conn.commit()
     conn.close()
     return tx_id
 
 
-def complete_transaction(tx_id):
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-    cur.execute("UPDATE transactions SET status='completed' WHERE id=?", (tx_id,))
-    conn.commit()
-    conn.close()
-
-
 def record_game(user_id, bet, win, xp_gain=10):
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     if win > 0:
-        cur.execute(
-            "UPDATE users SET games=games+1, wins=wins+1, xp=xp+?, "
-            "streak=streak+1, max_streak=MAX(max_streak, streak+1), "
-            "total_won=total_won+?, biggest_win=MAX(biggest_win,?) "
-            "WHERE user_id=?",
-            (xp_gain, win, win, user_id)
-        )
+        cur.execute("""UPDATE users SET games=games+1, wins=wins+1, xp=xp+?,
+                       streak=streak+1, max_streak=MAX(max_streak, streak+1),
+                       total_won=total_won+?, biggest_win=MAX(biggest_win,?)
+                       WHERE user_id=?""", (xp_gain, win, win, user_id))
     else:
-        cur.execute(
-            "UPDATE users SET games=games+1, xp=xp+?, streak=0, "
-            "total_lost=total_lost+? WHERE user_id=?",
-            (xp_gain // 2, bet, user_id)
-        )
+        cur.execute("""UPDATE users SET games=games+1, xp=xp+?, streak=0,
+                       total_lost=total_lost+? WHERE user_id=?""",
+                    (xp_gain // 2, bet, user_id))
 
-    # Реферальный процент (с проигрыша)
     if win == 0:
         cur.execute("SELECT referrer_id FROM users WHERE user_id=?", (user_id,))
         r = cur.fetchone()
@@ -191,9 +185,52 @@ def record_game(user_id, bet, win, xp_gain=10):
             from config import REFERRAL_PERCENT
             bonus = int(bet * REFERRAL_PERCENT)
             if bonus > 0:
-                cur.execute("UPDATE users SET balance=balance+?, referral_earnings=referral_earnings+? WHERE user_id=?",
-                            (bonus, bonus, r[0]))
+                cur.execute("""UPDATE users SET balance=balance+?,
+                               referral_earnings=referral_earnings+?
+                               WHERE user_id=?""", (bonus, bonus, r[0]))
+    conn.commit()
+    conn.close()
 
+
+def update_daily_bonus(user_id):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET last_bonus=? WHERE user_id=?", (int(time.time()), user_id))
+    conn.commit()
+    conn.close()
+
+
+def update_wheel_time(user_id):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET last_wheel=? WHERE user_id=?", (int(time.time()), user_id))
+    conn.commit()
+    conn.close()
+
+
+def unlock_achievement(user_id, ach_id):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT achievements FROM users WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    if row:
+        current = row[0].split(',') if row[0] else []
+        if ach_id not in current:
+            current.append(ach_id)
+            cur.execute("UPDATE users SET achievements=? WHERE user_id=?",
+                        (','.join(current), user_id))
+            conn.commit()
+            conn.close()
+            return True
+    conn.close()
+    return False
+
+
+def set_quests(user_id, quests):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET daily_quests=?, quests_date=? WHERE user_id=?",
+                (json.dumps(quests), time.strftime('%Y-%m-%d'), user_id))
     conn.commit()
     conn.close()
 
@@ -221,89 +258,30 @@ def register_referral(new_user_id, referrer_id):
     return False
 
 
-def update_daily_bonus(user_id):
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET last_bonus=? WHERE user_id=?",
-                (int(time.time()), user_id))
-    conn.commit()
-    conn.close()
-
-
-def update_wheel_time(user_id):
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET last_wheel=? WHERE user_id=?",
-                (int(time.time()), user_id))
-    conn.commit()
-    conn.close()
-
-
-def unlock_achievement(user_id, ach_id):
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-    cur.execute("SELECT achievements FROM users WHERE user_id=?", (user_id,))
-    row = cur.fetchone()
-    if row:
-        current = row[0].split(',') if row[0] else []
-        if ach_id not in current:
-            current.append(ach_id)
-            cur.execute("UPDATE users SET achievements=? WHERE user_id=?",
-                        (','.join(current), user_id))
-            conn.commit()
-            conn.close()
-            return True
-    conn.close()
-    return False
-
-
-def set_quests(user_id, quests):
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE users SET daily_quests=?, quests_date=? WHERE user_id=?",
-        (json.dumps(quests), time.strftime('%Y-%m-%d'), user_id)
-    )
-    conn.commit()
-    conn.close()
-
-
 def top_players(limit=10):
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
-    cur.execute("SELECT first_name, username, balance FROM users "
-                "WHERE banned=0 ORDER BY balance DESC LIMIT ?", (limit,))
+    cur.execute("""SELECT first_name, username, balance FROM users
+                   WHERE banned=0 ORDER BY balance DESC LIMIT ?""", (limit,))
     rows = cur.fetchall()
     conn.close()
     return rows
 
 
-# ============================================================
-# АДМИН
-# ============================================================
+# ============ АДМИН ============
 def admin_stats():
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*), SUM(balance), SUM(crystals) FROM users WHERE banned=0")
     users_count, total_balance, total_crystals = cur.fetchone()
-
     cur.execute("SELECT COUNT(*) FROM transactions WHERE status='completed'")
     tx_count = cur.fetchone()[0]
-
-    cur.execute("SELECT SUM(amount) FROM transactions WHERE status='completed' AND currency='RUB'")
-    total_rub = cur.fetchone()[0] or 0
-
-    cur.execute("SELECT SUM(amount) FROM transactions WHERE status='completed' AND currency='STARS'")
-    total_stars = cur.fetchone()[0] or 0
-
     conn.close()
     return {
         'users': users_count or 0,
         'total_balance': total_balance or 0,
         'total_crystals': total_crystals or 0,
         'transactions': tx_count,
-        'revenue_rub': total_rub,
-        'revenue_stars': total_stars
     }
 
 
@@ -329,17 +307,8 @@ def admin_broadcast_users():
 
 
 def make_promo(code, amount, uses=100):
-    """Создать промокод (сохраняется в таблицу промокодов)"""
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS promos (
-            code TEXT PRIMARY KEY,
-            amount INTEGER,
-            uses INTEGER,
-            used INTEGER DEFAULT 0
-        )
-    """)
     cur.execute("INSERT OR REPLACE INTO promos (code, amount, uses) VALUES (?, ?, ?)",
                 (code.upper(), amount, uses))
     conn.commit()
@@ -347,16 +316,8 @@ def make_promo(code, amount, uses=100):
 
 
 def use_promo(user_id, code):
-    """Активировать промокод. Возвращает сумму или None"""
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS promo_uses (
-            user_id INTEGER,
-            code TEXT,
-            PRIMARY KEY (user_id, code)
-        )
-    """)
     cur.execute("SELECT amount, uses, used FROM promos WHERE code=?", (code.upper(),))
     row = cur.fetchone()
     if not row:
@@ -376,3 +337,86 @@ def use_promo(user_id, code):
     conn.commit()
     conn.close()
     return amount
+
+
+# ============ ВЫВОД ============
+def create_withdrawal(user_id, crystals, payout_rub, payout_usdt, method, wallet):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("""INSERT INTO withdrawals
+                   (user_id, crystals, payout_rub, payout_usdt, method, wallet, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
+                (user_id, crystals, payout_rub, payout_usdt, method, wallet, int(time.time())))
+    wid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return wid
+
+
+def get_withdrawal(wid):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM withdrawals WHERE id=?", (wid,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        'id': row[0], 'user_id': row[1], 'crystals': row[2],
+        'payout_rub': row[3], 'payout_usdt': row[4],
+        'method': row[5], 'wallet': row[6], 'status': row[7],
+        'created_at': row[8], 'processed_at': row[9],
+        'admin_id': row[10], 'comment': row[11]
+    }
+
+
+def list_withdrawals(status='pending', limit=20):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("""SELECT w.*, u.first_name, u.username
+                   FROM withdrawals w JOIN users u ON u.user_id = w.user_id
+                   WHERE w.status = ? ORDER BY w.created_at ASC LIMIT ?""",
+                (status, limit))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def update_withdrawal(wid, status, admin_id=None, comment=None):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("""UPDATE withdrawals SET status=?, processed_at=?, admin_id=?, comment=?
+                   WHERE id=?""", (status, int(time.time()), admin_id, comment, wid))
+    conn.commit()
+    conn.close()
+
+
+def user_withdrawals(user_id, limit=10):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("""SELECT id, crystals, payout_rub, payout_usdt, method, status, created_at
+                   FROM withdrawals WHERE user_id=? ORDER BY created_at DESC LIMIT ?""",
+                (user_id, limit))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def total_withdrawn(user_id):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("""SELECT SUM(crystals) FROM withdrawals
+                   WHERE user_id=? AND status='approved'""", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] or 0
+
+
+def pending_withdrawals_count(user_id):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("""SELECT COUNT(*) FROM withdrawals
+                   WHERE user_id=? AND status='pending'""", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] or 0
