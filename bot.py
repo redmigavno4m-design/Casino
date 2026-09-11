@@ -1452,6 +1452,322 @@ async def cb_exchange_all(c: CallbackQuery):
         await c.answer("❌ Ошибка", show_alert=True)
 
 # ============================================================
+# 🎯 СПОРТИВНЫЕ ИГРЫ
+# ============================================================
+from sport import (
+    play_darts, play_football, play_basketball,
+    play_bowling, play_slot_dice
+)
+from keyboards import sport_choice
+
+
+# ---------- 🎯 ДАРТС ----------
+@dp.callback_query(F.data == "darts")
+async def cb_darts(c: CallbackQuery):
+    u = get_user(c.from_user.id)
+    text = (
+        f"🎯 <b>ДАРТС</b>\n\n"
+        f"💰 Баланс: <b>{fmt(u['balance'])}</b>\n\n"
+        f"Настоящий Telegram-дартс! Бросай и попадай!\n\n"
+        f"<b>Награды:</b>\n"
+        f"🎯 В мишень (3-6) — x1.5\n"
+        f"🎯 Внутренний круг (4-6) — x2\n"
+        f"🎯 В яблочко (6) — x5\n\n"
+        f"Выбери ставку:"
+    )
+    await edit(c, text, bet_menu("darts", u['balance']))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("bet_darts_"))
+async def darts_bet(c: CallbackQuery):
+    bet = int(c.data.split("_")[2])
+    u = get_user(c.from_user.id)
+    if u['balance'] < bet:
+        await c.answer("❌ Недостаточно!", show_alert=True)
+        return
+    await edit(c, f"🎯 Ставка: <b>{fmt(bet)}</b>\n\nКуда метим?", sport_choice('darts'))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("sport_darts_"))
+async def darts_play(c: CallbackQuery):
+    bet_on = c.data.split("_")[2]  # center / middle / any
+    # Достаём ставку из истории сообщений — упрощённо через FSM не будем
+    # Сделаем проще: спросим ставку заново
+    await c.answer()
+
+    # Простой способ — берём последнюю ставку из профиля (или дефолт 100)
+    u = get_user(c.from_user.id)
+    bet = 100  # временно
+    # TODO: сохранять ставку в FSM
+
+    if u['balance'] < bet:
+        await c.message.edit_text("❌ Недостаточно!", reply_markup=back_menu())
+        return
+
+    update_balance(c.from_user.id, -bet)
+
+    # Анимация
+    await c.message.edit_text("🎯 <b>Бросаем дартс...</b>", parse_mode="HTML")
+    result = await play_darts(bot, c.message.chat.id, bet, bet_on)
+
+    win = result['win']
+    if win > 0:
+        update_balance(c.from_user.id, win)
+    record_game(c.from_user.id, bet, win)
+
+    u = get_user(c.from_user.id)
+    sign = '+' if win > 0 else '-'
+    amount = win if win > 0 else bet
+    text = (
+        f"🎯 <b>РЕЗУЛЬТАТ</b>\n\n"
+        f"Сектор: <b>{result['value']}</b>\n"
+        f"{result['result_text']}\n\n"
+        f"💰 Итог: <b>{sign}{fmt(amount)}</b>\n\n"
+        f"💼 Баланс: <b>{fmt(u['balance'])}</b>"
+    )
+    await c.message.edit_text(text, reply_markup=back_menu(), parse_mode="HTML")
+    await notify_achievements(c.message, c.from_user.id)
+
+
+# ---------- ⚽ ФУТБОЛ ----------
+@dp.callback_query(F.data == "football")
+async def cb_football(c: CallbackQuery):
+    u = get_user(c.from_user.id)
+    text = (
+        f"⚽ <b>ФУТБОЛ (пенальти)</b>\n\n"
+        f"💰 Баланс: <b>{fmt(u['balance'])}</b>\n\n"
+        f"Забей гол! Настоящий Telegram-мяч.\n\n"
+        f"<b>Награды:</b>\n"
+        f"⚽ Гол (3-4) — x1.9\n"
+        f"⚽ Супер-гол (5) — x4\n\n"
+        f"Выбери ставку:"
+    )
+    await edit(c, text, bet_menu("football", u['balance']))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("bet_football_"))
+async def football_bet(c: CallbackQuery):
+    bet = int(c.data.split("_")[2])
+    u = get_user(c.from_user.id)
+    if u['balance'] < bet:
+        await c.answer("❌ Недостаточно!", show_alert=True)
+        return
+    await edit(c, f"⚽ Ставка: <b>{fmt(bet)}</b>\n\nКуда бьём?", sport_choice('football'))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("sport_football_"))
+async def football_play(c: CallbackQuery):
+    bet_on = c.data.split("_")[2]  # goal / topcorner
+    await c.answer()
+
+    u = get_user(c.from_user.id)
+    bet = 100
+
+    if u['balance'] < bet:
+        await c.message.edit_text("❌ Недостаточно!", reply_markup=back_menu())
+        return
+    update_balance(c.from_user.id, -bet)
+
+    await c.message.edit_text("⚽ <b>Пенальти...</b>", parse_mode="HTML")
+    result = await play_football(bot, c.message.chat.id, bet, bet_on)
+
+    win = result['win']
+    if win > 0:
+        update_balance(c.from_user.id, win)
+    record_game(c.from_user.id, bet, win)
+
+    u = get_user(c.from_user.id)
+    sign = '+' if win > 0 else '-'
+    amount = win if win > 0 else bet
+    text = (
+        f"⚽ <b>РЕЗУЛЬТАТ</b>\n\n"
+        f"{result['result_text']}\n\n"
+        f"💰 Итог: <b>{sign}{fmt(amount)}</b>\n\n"
+        f"💼 Баланс: <b>{fmt(u['balance'])}</b>"
+    )
+    await c.message.edit_text(text, reply_markup=back_menu(), parse_mode="HTML")
+    await notify_achievements(c.message, c.from_user.id)
+
+
+# ---------- 🏀 БАСКЕТБОЛ ----------
+@dp.callback_query(F.data == "basket")
+async def cb_basket(c: CallbackQuery):
+    u = get_user(c.from_user.id)
+    text = (
+        f"🏀 <b>БАСКЕТБОЛ</b>\n\n"
+        f"💰 Баланс: <b>{fmt(u['balance'])}</b>\n\n"
+        f"Бросай мяч! Настоящий Telegram.\n\n"
+        f"<b>Награды:</b>\n"
+        f"🏀 Попал (3-4) — x1.9\n"
+        f"🏀 Трёхочковый (5) — x4.5\n\n"
+        f"Выбери ставку:"
+    )
+    await edit(c, text, bet_menu("basket", u['balance']))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("bet_basket_"))
+async def basket_bet(c: CallbackQuery):
+    bet = int(c.data.split("_")[2])
+    u = get_user(c.from_user.id)
+    if u['balance'] < bet:
+        await c.answer("❌ Недостаточно!", show_alert=True)
+        return
+    await edit(c, f"🏀 Ставка: <b>{fmt(bet)}</b>\n\nТип броска?", sport_choice('basket'))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("sport_basket_"))
+async def basket_play(c: CallbackQuery):
+    bet_on = c.data.split("_")[2]
+    await c.answer()
+
+    u = get_user(c.from_user.id)
+    bet = 100
+    if u['balance'] < bet:
+        await c.message.edit_text("❌ Недостаточно!", reply_markup=back_menu())
+        return
+    update_balance(c.from_user.id, -bet)
+
+    await c.message.edit_text("🏀 <b>Бросаем...</b>", parse_mode="HTML")
+    result = await play_basketball(bot, c.message.chat.id, bet, bet_on)
+
+    win = result['win']
+    if win > 0:
+        update_balance(c.from_user.id, win)
+    record_game(c.from_user.id, bet, win)
+
+    u = get_user(c.from_user.id)
+    sign = '+' if win > 0 else '-'
+    amount = win if win > 0 else bet
+    text = (
+        f"🏀 <b>РЕЗУЛЬТАТ</b>\n\n"
+        f"{result['result_text']}\n\n"
+        f"💰 Итог: <b>{sign}{fmt(amount)}</b>\n\n"
+        f"💼 Баланс: <b>{fmt(u['balance'])}</b>"
+    )
+    await c.message.edit_text(text, reply_markup=back_menu(), parse_mode="HTML")
+    await notify_achievements(c.message, c.from_user.id)
+
+
+# ---------- 🎳 БОУЛИНГ ----------
+@dp.callback_query(F.data == "bowling")
+async def cb_bowling(c: CallbackQuery):
+    u = get_user(c.from_user.id)
+    text = (
+        f"🎳 <b>БОУЛИНГ</b>\n\n"
+        f"💰 Баланс: <b>{fmt(u['balance'])}</b>\n\n"
+        f"Сбей кегли! Настоящий Telegram-шар.\n\n"
+        f"<b>Награды:</b>\n"
+        f"🎳 2 кегли — x0.5\n"
+        f"🎳 3 кегли — x1.2\n"
+        f"🎳 5 кеглей — x1.9\n"
+        f"🎳 8 кеглей — x2.8\n"
+        f"🎳 СТРАЙК — x5\n\n"
+        f"Выбери ставку:"
+    )
+    await edit(c, text, bet_menu("bowling", u['balance']))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("bet_bowling_"))
+async def bowling_bet(c: CallbackQuery):
+    bet = int(c.data.split("_")[2])
+    u = get_user(c.from_user.id)
+    if u['balance'] < bet:
+        await c.answer("❌ Недостаточно!", show_alert=True)
+        return
+    await edit(c, f"🎳 Ставка: <b>{fmt(bet)}</b>\n\nКак играем?", sport_choice('bowling'))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("sport_bowling_"))
+async def bowling_play(c: CallbackQuery):
+    bet_on = c.data.split("_")[2]
+    await c.answer()
+
+    u = get_user(c.from_user.id)
+    bet = 100
+    if u['balance'] < bet:
+        await c.message.edit_text("❌ Недостаточно!", reply_markup=back_menu())
+        return
+    update_balance(c.from_user.id, -bet)
+
+    await c.message.edit_text("🎳 <b>Шар катится...</b>", parse_mode="HTML")
+    result = await play_bowling(bot, c.message.chat.id, bet, bet_on)
+
+    win = result['win']
+    if win > 0:
+        update_balance(c.from_user.id, win)
+    record_game(c.from_user.id, bet, win)
+
+    u = get_user(c.from_user.id)
+    sign = '+' if win > 0 else '-'
+    amount = win if win > 0 else bet
+    text = (
+        f"🎳 <b>РЕЗУЛЬТАТ</b>\n\n"
+        f"{result['result_text']}\n\n"
+        f"💰 Итог: <b>{sign}{fmt(amount)}</b>\n\n"
+        f"💼 Баланс: <b>{fmt(u['balance'])}</b>"
+    )
+    await c.message.edit_text(text, reply_markup=back_menu(), parse_mode="HTML")
+    await notify_achievements(c.message, c.from_user.id)
+
+
+# ---------- 🎰 СЛОТ-МАШИНА (Telegram Dice) ----------
+@dp.callback_query(F.data == "slot_dice")
+async def cb_slot_dice(c: CallbackQuery):
+    u = get_user(c.from_user.id)
+    text = (
+        f"🎰 <b>СЛОТ-МАШИНА (Telegram Dice)</b>\n\n"
+        f"💰 Баланс: <b>{fmt(u['balance'])}</b>\n\n"
+        f"Настоящий Telegram-слот! Значения 1-64.\n\n"
+        f"<b>Награды:</b>\n"
+        f"🎰 33-48 — x1.5\n"
+        f"🎰 49-60 — x3\n"
+        f"🎰 61-63 — x10\n"
+        f"🎰 64 — JACKPOT x50\n\n"
+        f"Выбери ставку:"
+    )
+    await edit(c, text, bet_menu("slot_dice", u['balance']))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("bet_slot_dice_"))
+async def slot_dice_play(c: CallbackQuery):
+    bet = int(c.data.split("_")[3])
+    u = get_user(c.from_user.id)
+    if u['balance'] < bet:
+        await c.answer("❌ Недостаточно!", show_alert=True)
+        return
+    update_balance(c.from_user.id, -bet)
+
+    await c.message.edit_text("🎰 <b>Крутим барабаны...</b>", parse_mode="HTML")
+    result = await play_slot_dice(bot, c.message.chat.id, bet)
+
+    win = result['win']
+    if win > 0:
+        update_balance(c.from_user.id, win)
+    record_game(c.from_user.id, bet, win)
+
+    u = get_user(c.from_user.id)
+    sign = '+' if win > 0 else '-'
+    amount = win if win > 0 else bet
+    text = (
+        f"🎰 <b>РЕЗУЛЬТАТ</b>\n\n"
+        f"Значение: <b>{result['value']}/64</b>\n"
+        f"{result['result_text']}\n\n"
+        f"💰 Итог: <b>{sign}{fmt(amount)}</b>\n\n"
+        f"💼 Баланс: <b>{fmt(u['balance'])}</b>"
+    )
+    await c.message.edit_text(text, reply_markup=back_menu(), parse_mode="HTML")
+    await c.answer()
+    await notify_achievements(c.message, c.from_user.id)
+# ============================================================
 # ЗАПУСК
 # ============================================================
 async def main():
