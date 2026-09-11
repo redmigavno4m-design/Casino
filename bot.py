@@ -1,12 +1,24 @@
+# -*- coding: utf-8 -*-
+"""
+🎰 CASINO ROYALE 5.0 — Полный Telegram-бот
+С реалистичными анимациями, покером, дуэлями, чатом и графиком
+"""
 import asyncio
 import time
-import json
+import random
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import CommandStart, Command
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    BufferedInputFile
+)
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
-from config import BOT_TOKEN, DAILY_BONUS, WHEEL_PRIZES, WHEEL_COOLDOWN
+from config import (
+    BOT_TOKEN, DAILY_BONUS, WHEEL_PRIZES, WHEEL_COOLDOWN,
+    POKER_RAKE, PROMOCODES
+)
 from database import (
     init_db, get_user, update_balance, record_game,
     update_daily_bonus, update_wheel_time, unlock_achievement,
@@ -14,23 +26,34 @@ from database import (
 )
 from games import (
     play_slots, play_roulette, play_dice, play_coin,
-    new_deck, hand_value, card_str, hand_str,
-    mines_new_game, mines_multiplier,
-    spin_wheel, ACHIEVEMENTS, check_achievements,
-    get_level, generate_quests, LEVELS
+    mines_new_game, mines_multiplier, spin_wheel,
+    ACHIEVEMENTS, check_achievements, get_level, generate_quests
 )
+from poker import (
+    new_game as poker_new_game, best_hand, compare,
+    advance_phase, dealer_action, hand_str, card_str
+)
+from duel import create_duel, attack as duel_attack, defend as duel_defend, active_duels
+from dice_anim import roll_real_dice, animate_slots, animate_roulette, animate_coin
+from graph import make_balance_graph
+from promo import activate as promo_activate
 from keyboards import (
     main_menu, back_menu, bet_menu, bj_menu, mines_grid_buttons
 )
 
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Активные игры в памяти
+# Хранилища активных игр в памяти
 bj_games = {}
 mines_games = {}
+poker_games = {}
 
 
+# ============================================================
+# УТИЛИТЫ
+# ============================================================
 def fmt(amount):
     return f"{int(amount):,}".replace(",", " ") + "$"
 
@@ -59,14 +82,14 @@ async def notify_achievements(message, user_id):
 
 
 # ============================================================
-# СТАРТ
+# START
 # ============================================================
 @dp.message(CommandStart())
 async def start(m: Message):
     u = get_user(m.from_user.id, m.from_user.username, m.from_user.first_name)
-    lvl_i, lvl_name, xp_to_next, _ = get_level(u['xp'])
+    lvl_i, lvl_name, _, _ = get_level(u['xp'])
     text = (
-        f"🎰 <b>CASINO ROYALE</b>\n\n"
+        f"🎰 <b>CASINO ROYALE 5.0</b>\n\n"
         f"{header(u)}"
         f"🏅 Уровень: <b>{lvl_name}</b>\n"
         f"⚡ Опыт: <b>{u['xp']}</b>\n"
@@ -76,12 +99,43 @@ async def start(m: Message):
     await m.answer(text, reply_markup=main_menu(), parse_mode="HTML")
 
 
+@dp.message(Command("promo"))
+async def cmd_promo(m: Message):
+    """Использование: /promo CODE"""
+    parts = m.text.split()
+    if len(parts) < 2:
+        await m.answer("📝 Используй: <code>/promo КОД</code>", parse_mode="HTML")
+        return
+    code = parts[1]
+    ok, amount, msg = promo_activate(m.from_user.id, code)
+    if ok:
+        update_balance(m.from_user.id, amount)
+        u = get_user(m.from_user.id)
+        await m.answer(
+            f"🎁 <b>Промокод активирован!</b>\n\n"
+            f"💰 {msg}\n"
+            f"💼 Баланс: <b>{fmt(u['balance'])}</b>",
+            parse_mode="HTML"
+        )
+    else:
+        await m.answer(msg)
+
+
+@dp.message(Command("balance"))
+async def cmd_balance(m: Message):
+    u = get_user(m.from_user.id)
+    await m.answer(f"💰 Баланс: <b>{fmt(u['balance'])}</b>", parse_mode="HTML")
+
+
+# ============================================================
+# ГЛАВНОЕ МЕНЮ
+# ============================================================
 @dp.callback_query(F.data == "main_menu")
 async def cb_main(c: CallbackQuery):
     u = get_user(c.from_user.id)
-    lvl_i, lvl_name, xp_to_next, _ = get_level(u['xp'])
+    lvl_i, lvl_name, _, _ = get_level(u['xp'])
     text = (
-        f"🎰 <b>CASINO ROYALE</b>\n\n"
+        f"🎰 <b>CASINO ROYALE 5.0</b>\n\n"
         f"{header(u)}"
         f"🏅 <b>{lvl_name}</b> | ⚡ {u['xp']} XP\n\n"
         f"Выбирай игру:"
@@ -95,19 +149,19 @@ async def cb_noop(c: CallbackQuery):
     await c.answer("Возьми бонус 🎁", show_alert=True)
 
 
+# ============================================================
+# ПРОФИЛЬ / ТОП / АЧИВКИ / БОНУС / КВЕСТЫ
+# ============================================================
 @dp.callback_query(F.data == "profile")
 async def cb_profile(c: CallbackQuery):
     u = get_user(c.from_user.id)
     wr = (u['wins'] / u['games'] * 100) if u['games'] else 0
-    lvl_i, lvl_name, xp_to_next, next_name = get_level(u['xp'])
-    ach_count = len(u['achievements'])
-    ach_total = len(ACHIEVEMENTS)
+    lvl_i, lvl_name, xp_next, _ = get_level(u['xp'])
     text = (
         f"👤 <b>Профиль</b>\n\n"
         f"💰 Баланс: <b>{fmt(u['balance'])}</b>\n"
         f"🏅 Уровень: <b>{lvl_name}</b>\n"
-        f"⚡ Опыт: <b>{u['xp']}</b>"
-        + (f" (до следующего: {xp_to_next})\n" if next_name else "\n") +
+        f"⚡ Опыт: <b>{u['xp']}</b>\n"
         f"🎮 Игр: <b>{u['games']}</b>\n"
         f"🏆 Побед: <b>{u['wins']}</b>\n"
         f"📊 Винрейт: <b>{wr:.1f}%</b>\n"
@@ -115,7 +169,7 @@ async def cb_profile(c: CallbackQuery):
         f"💎 Рекорд: <b>{fmt(u['biggest_win'])}</b>\n"
         f"📈 Выиграно: <b>{fmt(u['total_won'])}</b>\n"
         f"📉 Проиграно: <b>{fmt(u['total_lost'])}</b>\n"
-        f"🏆 Ачивки: <b>{ach_count}/{ach_total}</b>"
+        f"🏆 Ачивки: <b>{len(u['achievements'])}/{len(ACHIEVEMENTS)}</b>"
     )
     await edit(c, text, back_menu())
     await c.answer()
@@ -167,14 +221,10 @@ async def cb_daily(c: CallbackQuery):
     await c.answer()
 
 
-# ============================================================
-# КВЕСТЫ
-# ============================================================
 @dp.callback_query(F.data == "quests")
 async def cb_quests(c: CallbackQuery):
     u = get_user(c.from_user.id)
     today = time.strftime('%Y-%m-%d')
-
     if u['quests_date'] != today or not u['daily_quests']:
         quests = generate_quests()
         set_quests(c.from_user.id, quests)
@@ -184,9 +234,8 @@ async def cb_quests(c: CallbackQuery):
     text = "🎯 <b>ЕЖЕДНЕВНЫЕ КВЕСТЫ</b>\n\n"
     for qid, q in quests.items():
         mark = "✅" if q['done'] else "▶️"
-        progress = f"{q['progress']}/{q['target']}"
         text += f"{mark} <b>{q['text']}</b>\n"
-        text += f"   Прогресс: {progress} | Награда: {q['reward']}$\n\n"
+        text += f"   {q['progress']}/{q['target']} | 🎁 {q['reward']}$\n\n"
     await edit(c, text, back_menu())
     await c.answer()
 
@@ -200,11 +249,10 @@ async def cb_wheel(c: CallbackQuery):
     now = int(time.time())
     if now - u['last_wheel'] < WHEEL_COOLDOWN:
         w = WHEEL_COOLDOWN - (now - u['last_wheel'])
-        text = f"🎡 <b>Колесо фортуны</b>\n\n⏳ Следующий спин через <b>{w//3600}ч {(w%3600)//60}м</b>"
+        text = f"🎡 <b>Колесо фортуны</b>\n\n⏳ Через <b>{w//3600}ч {(w%3600)//60}м</b>"
         await edit(c, text, back_menu())
         await c.answer()
         return
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎡 КРУТИТЬ!", callback_data="wheel_spin")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="main_menu")],
@@ -228,33 +276,32 @@ async def cb_wheel_spin(c: CallbackQuery):
         return
 
     idx, prize = spin_wheel(WHEEL_PRIZES)
-    update_balance(c.from_user.id, prize)
-    update_wheel_time(c.from_user.id)
 
-    # Анимация через редактирование
-    for i in range(3):
-        await asyncio.sleep(0.4)
+    # Анимация "рулетки" через редактирование
+    for i in range(6):
+        marker = "◀️"
+        bar = "🎁 " * (i % 3) + marker + " " + "🎁 " * (2 - i % 3)
         try:
             await c.message.edit_text(
-                f"🎡 <b>Крутится...</b>\n\n"
-                f"{'◀️' * (i+1)} 🎁 🎁 🎁",
+                f"🎡 <b>Крутится...</b>\n\n{bar}",
                 parse_mode="HTML"
             )
         except Exception:
             pass
+        await asyncio.sleep(0.3)
 
+    update_balance(c.from_user.id, prize)
+    update_wheel_time(c.from_user.id)
     u = get_user(c.from_user.id)
-    text = (
-        f"🎉 <b>ВЫПАЛО: {prize}$!</b>\n\n"
-        f"{header(u)}"
-    )
+
+    text = f"🎉 <b>ВЫПАЛО: {prize}$!</b>\n\n{header(u)}"
     await edit(c, text, back_menu())
     await c.answer(f"🎉 +{prize}$", show_alert=True)
     await notify_achievements(c.message, c.from_user.id)
 
 
 # ============================================================
-# СЛОТЫ
+# 🎰 СЛОТЫ (с анимацией)
 # ============================================================
 @dp.callback_query(F.data == "slots")
 async def cb_slots(c: CallbackQuery):
@@ -278,7 +325,13 @@ async def slots_play(c: CallbackQuery):
         await c.answer("❌ Недостаточно!", show_alert=True)
         return
     update_balance(c.from_user.id, -bet)
+
     win, reels, desc = play_slots(bet)
+
+    # Анимация через редактирование
+    msg = await c.message.edit_text("🎰 <b>Крутим барабаны...</b>", parse_mode="HTML")
+    await animate_slots(bot, c.message.chat.id, msg.message_id, reels)
+
     if win > 0:
         update_balance(c.from_user.id, win)
     record_game(c.from_user.id, bet, win)
@@ -294,13 +347,13 @@ async def slots_play(c: CallbackQuery):
         f"💰 Итог: <b>{result}{fmt(amount)}</b>\n\n"
         f"💼 Баланс: <b>{fmt(u['balance'])}</b>"
     )
-    await edit(c, text, bet_menu("slots", u['balance']))
+    await c.message.edit_text(text, reply_markup=bet_menu("slots", u['balance']), parse_mode="HTML")
     await c.answer()
     await notify_achievements(c.message, c.from_user.id)
 
 
 # ============================================================
-# РУЛЕТКА
+# 🎡 РУЛЕТКА (с анимацией)
 # ============================================================
 @dp.callback_query(F.data == "roulette")
 async def cb_roulette(c: CallbackQuery):
@@ -337,10 +390,17 @@ async def roulette_spin(c: CallbackQuery):
         await c.answer("❌ Недостаточно!", show_alert=True)
         return
     update_balance(c.from_user.id, -bet)
+
     win, n, color = play_roulette(bet, pick)
+
+    # Анимация колеса
+    msg = await c.message.edit_text("🎡 <b>Крутится колесо...</b>", parse_mode="HTML")
+    await animate_roulette(bot, c.message.chat.id, msg.message_id, n)
+
     if win > 0:
         update_balance(c.from_user.id, win)
     record_game(c.from_user.id, bet, win)
+
     u = get_user(c.from_user.id)
     result = '+' if win > 0 else '-'
     amount = win if win > 0 else bet
@@ -356,7 +416,7 @@ async def roulette_spin(c: CallbackQuery):
 
 
 # ============================================================
-# КОСТИ
+# 🎲 КОСТИ (настоящий Telegram Dice!)
 # ============================================================
 @dp.callback_query(F.data == "dice")
 async def cb_dice(c: CallbackQuery):
@@ -393,27 +453,41 @@ async def dice_roll(c: CallbackQuery):
         await c.answer("❌ Недостаточно!", show_alert=True)
         return
     update_balance(c.from_user.id, -bet)
-    win, v = play_dice(bet, pick)
+
+    # 🎲 НАСТОЯЩИЙ Telegram Dice — крутится у всех в чате!
+    await c.answer()
+    await c.message.answer("🎲 Бросаем кость...")
+    value = await roll_real_dice(bot, c.message.chat.id, emoji="🎲")
+
+    # Логика
+    win = 0
+    if pick == 'high' and value > 3:
+        win = int(bet * 1.9)
+    elif pick == 'low' and value < 4:
+        win = int(bet * 1.9)
+    elif pick == 'six' and value == 6:
+        win = int(bet * 4.5)
+
     if win > 0:
         update_balance(c.from_user.id, win)
     record_game(c.from_user.id, bet, win)
+
     u = get_user(c.from_user.id)
     faces = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣"}
     result = '+' if win > 0 else '-'
     amount = win if win > 0 else bet
     text = (
         f"🎲 <b>РЕЗУЛЬТАТ</b>\n\n"
-        f"Выпало: {faces[v]} <b>{v}</b>\n\n"
+        f"Выпало: {faces[value]} <b>{value}</b>\n\n"
         f"💰 Итог: <b>{result}{fmt(amount)}</b>\n\n"
         f"💼 Баланс: <b>{fmt(u['balance'])}</b>"
     )
-    await edit(c, text, back_menu())
-    await c.answer()
+    await c.message.answer(text, reply_markup=back_menu(), parse_mode="HTML")
     await notify_achievements(c.message, c.from_user.id)
 
 
 # ============================================================
-# МОНЕТКА
+# 🪙 МОНЕТКА (с анимацией)
 # ============================================================
 @dp.callback_query(F.data == "coin")
 async def cb_coin(c: CallbackQuery):
@@ -449,10 +523,17 @@ async def coin_flip(c: CallbackQuery):
         await c.answer("❌ Недостаточно!", show_alert=True)
         return
     update_balance(c.from_user.id, -bet)
+
     win, result = play_coin(bet, pick)
+
+    # Анимация монетки
+    msg = await c.message.edit_text("🪙 <b>Подбрасываем...</b>", parse_mode="HTML")
+    await animate_coin(bot, c.message.chat.id, msg.message_id, result)
+
     if win > 0:
         update_balance(c.from_user.id, win)
     record_game(c.from_user.id, bet, win)
+
     u = get_user(c.from_user.id)
     result_str = "🦅 Орёл" if result == 'eagle' else "🪙 Решка"
     r = '+' if win > 0 else '-'
@@ -494,6 +575,7 @@ async def bj_start(c: CallbackQuery):
         return
     update_balance(c.from_user.id, -bet)
 
+    from games import new_deck, hand_value
     deck = new_deck()
     player = [deck.pop(), deck.pop()]
     dealer = [deck.pop(), deck.pop()]
@@ -516,6 +598,7 @@ async def bj_start(c: CallbackQuery):
 
 @dp.callback_query(F.data == "bj_hit")
 async def bj_hit(c: CallbackQuery):
+    from games import hand_value
     g = bj_games.get(c.from_user.id)
     if not g or not g['active']:
         await c.answer("Игра не активна", show_alert=True)
@@ -551,6 +634,7 @@ async def bj_hit(c: CallbackQuery):
 
 @dp.callback_query(F.data == "bj_stand")
 async def bj_stand(c: CallbackQuery):
+    from games import hand_value
     g = bj_games.get(c.from_user.id)
     if not g or not g['active']:
         await c.answer("Игра не активна", show_alert=True)
@@ -599,8 +683,8 @@ async def cb_mines(c: CallbackQuery):
     text = (
         f"💣 <b>МИНЫ</b>\n\n"
         f"💰 Баланс: <b>{fmt(u['balance'])}</b>\n\n"
-        f"Сетка 5×5, 3 мины. Открывай клетки,\n"
-        f"множитель растёт. Забери выигрыш — или взорвёшься!\n\n"
+        f"Сетка 5×5, 3 мины. Открывай клетки —\n"
+        f"множитель растёт. Забери выигрыш или взорвёшься!\n\n"
         f"Выбери ставку:"
     )
     await edit(c, text, bet_menu("mines", u['balance']))
@@ -627,8 +711,7 @@ async def mines_start(c: CallbackQuery):
         f"💣 <b>МИНЫ</b>\n\n"
         f"💰 Ставка: <b>{fmt(bet)}</b>\n"
         f"🎯 Открыто: <b>0</b>\n"
-        f"💎 Множитель: <b>x1.00</b>\n\n"
-        f"Открывай клетки!"
+        f"💎 Множитель: <b>x1.00</b>"
     )
     await edit(c, text, mines_grid_buttons(g, g['opened'], g['mines']))
     await c.answer()
@@ -640,15 +723,12 @@ async def mines_open(c: CallbackQuery):
     if not g or g['finished']:
         await c.answer("Игра не активна", show_alert=True)
         return
-
     idx = int(c.data.split("_")[2])
-
     if idx in g['opened']:
         await c.answer("Уже открыто!")
         return
 
     if idx in g['mines']:
-        # Взорвались
         g['finished'] = True
         record_game(c.from_user.id, g['bet'], 0)
         u = get_user(c.from_user.id)
@@ -665,14 +745,12 @@ async def mines_open(c: CallbackQuery):
     g['opened'].add(idx)
     mult = mines_multiplier(len(g['opened']), 3)
     potential = int(g['bet'] * mult)
-
     text = (
         f"💣 <b>МИНЫ</b>\n\n"
         f"💰 Ставка: <b>{fmt(g['bet'])}</b>\n"
         f"🎯 Открыто: <b>{len(g['opened'])}</b>\n"
         f"💎 Множитель: <b>x{mult}</b>\n"
-        f"💵 Можешь забрать: <b>{fmt(potential)}</b>\n\n"
-        f"Продолжаешь?"
+        f"💵 Забрать: <b>{fmt(potential)}</b>"
     )
     await edit(c, text, mines_grid_buttons(g, g['opened'], g['mines']))
     await c.answer()
@@ -684,13 +762,11 @@ async def mines_cashout(c: CallbackQuery):
     if not g or g['finished'] or not g['opened']:
         await c.answer("Нечего забирать", show_alert=True)
         return
-
     mult = mines_multiplier(len(g['opened']), 3)
     win = int(g['bet'] * mult)
     update_balance(c.from_user.id, win)
     record_game(c.from_user.id, g['bet'], win)
     g['finished'] = True
-
     u = get_user(c.from_user.id)
     text = (
         f"💰 <b>ЗАБРАЛ!</b>\n\n"
@@ -706,11 +782,488 @@ async def mines_cashout(c: CallbackQuery):
 
 
 # ============================================================
+# 🃏 ПОКЕР
+# ============================================================
+@dp.callback_query(F.data == "poker")
+async def cb_poker(c: CallbackQuery):
+    u = get_user(c.from_user.id)
+    text = (
+        f"🃏 <b>ТЕХАССКИЙ ХОЛДЕМ</b>\n\n"
+        f"💰 Баланс: <b>{fmt(u['balance'])}</b>\n\n"
+        f"1-на-1 против дилера. Рейк казино: 5%.\n\n"
+        f"Выбери ставку (блайнд):"
+    )
+    await edit(c, text, bet_menu("poker", u['balance']))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("bet_poker_"))
+async def poker_start(c: CallbackQuery):
+    bet = int(c.data.split("_")[2])
+    u = get_user(c.from_user.id)
+    if u['balance'] < bet:
+        await c.answer("❌ Недостаточно!", show_alert=True)
+        return
+    update_balance(c.from_user.id, -bet)
+
+    game = poker_new_game(bet)
+    poker_games[c.from_user.id] = game
+
+    text = (
+        f"🃏 <b>ПОКЕР</b>\n\n"
+        f"🤖 Дилер: 🎴 🎴\n"
+        f"👤 Ты: {hand_str(game['player'])}\n\n"
+        f"💰 Банк: <b>{fmt(game['pot'])}</b>\n"
+        f"📋 Фаза: <b>Префлоп</b>\n\n"
+        f"Ход:"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Чек", callback_data="poker_check"),
+         InlineKeyboardButton(text="📞 Колл", callback_data="poker_call")],
+        [InlineKeyboardButton(text="💰 Рейз", callback_data="poker_raise"),
+         InlineKeyboardButton(text="🚪 Фолд", callback_data="poker_fold")],
+    ])
+    await edit(c, text, kb)
+    await c.answer()
+
+
+def poker_render(game, my_cards_hidden=False, dealer_hidden=True):
+    phase_names = {'preflop': 'Префлоп', 'flop': 'Флоп',
+                   'turn': 'Тёрн', 'river': 'Ривер', 'showdown': 'Шоудаун'}
+    community = " ".join(card_str(c) for c in game['community']) or "—"
+    dealer_cards = hand_str(game['dealer'], hidden=dealer_hidden)
+    my_cards = hand_str(game['player'])
+    text = (
+        f"🃏 <b>ПОКЕР</b>\n\n"
+        f"🤖 Дилер: {dealer_cards}\n"
+        f"👤 Ты: {my_cards}\n\n"
+        f"🎴 Общие: {community}\n\n"
+        f"💰 Банк: <b>{fmt(game['pot'])}</b>\n"
+        f"📋 Фаза: <b>{phase_names.get(game['phase'], game['phase'])}</b>\n"
+    )
+    return text
+
+
+def poker_actions_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Чек", callback_data="poker_check"),
+         InlineKeyboardButton(text="📞 Колл", callback_data="poker_call")],
+        [InlineKeyboardButton(text="💰 Рейз", callback_data="poker_raise"),
+         InlineKeyboardButton(text="🚪 Фолд", callback_data="poker_fold")],
+    ])
+
+
+@dp.callback_query(F.data == "poker_check")
+async def poker_check(c: CallbackQuery):
+    game = poker_games.get(c.from_user.id)
+    if not game or not game['active']:
+        await c.answer("Нет активной игры", show_alert=True)
+        return
+
+    # Действие дилера
+    action = dealer_action(game)
+    if action == 'fold':
+        # Дилер сбрасывает — победа
+        rake = int(game['pot'] * POKER_RAKE)
+        win = game['pot'] - rake
+        update_balance(c.from_user.id, win)
+        record_game(c.from_user.id, game['blind'], win)
+        game['active'] = False
+        text = (
+            f"🎉 <b>Дилер сбросил!</b>\n\n"
+            f"💰 Выигрыш: <b>+{fmt(win)}</b>\n"
+            f"💸 Рейк: <b>-{fmt(rake)}</b>\n\n"
+            f"💼 Баланс: <b>{fmt(get_user(c.from_user.id)['balance'])}</b>"
+        )
+        await edit(c, text, back_menu())
+        await c.answer()
+        del poker_games[c.from_user.id]
+        return
+
+    # Дилер коллит или чек
+    need = game['player_bet'] - game['dealer_bet']
+    if need > 0:
+        game['dealer_chips'] -= need
+        game['dealer_bet'] += need
+        game['pot'] += need
+    elif action == 'raise' and game['dealer_chips'] >= 100:
+        game['dealer_chips'] -= 100
+        game['dealer_bet'] += 100
+        game['pot'] += 100
+
+    # Следующая улица
+    phase = advance_phase(game)
+
+    if phase == 'showdown':
+        await poker_showdown(c)
+        return
+
+    text = poker_render(game) + f"\nХод: <b>Твой</b>"
+    await edit(c, text, poker_actions_kb())
+    await c.answer()
+
+
+@dp.callback_query(F.data == "poker_call")
+async def poker_call(c: CallbackQuery):
+    game = poker_games.get(c.from_user.id)
+    if not game or not game['active']:
+        await c.answer("Нет активной игры", show_alert=True)
+        return
+
+    need = game['dealer_bet'] - game['player_bet']
+    if need > 0 and game['player_chips'] >= need:
+        game['player_chips'] -= need
+        game['player_bet'] += need
+        game['pot'] += need
+
+    # Дилер действует
+    action = dealer_action(game)
+    if action == 'fold':
+        rake = int(game['pot'] * POKER_RAKE)
+        win = game['pot'] - rake
+        update_balance(c.from_user.id, win)
+        record_game(c.from_user.id, game['blind'], win)
+        game['active'] = False
+        text = (
+            f"🎉 <b>Дилер сбросил!</b>\n\n"
+            f"💰 Выигрыш: <b>+{fmt(win)}</b>\n"
+            f"💸 Рейк: <b>-{fmt(rake)}</b>"
+        )
+        await edit(c, text, back_menu())
+        await c.answer()
+        del poker_games[c.from_user.id]
+        return
+
+    need2 = game['player_bet'] - game['dealer_bet']
+    if need2 > 0 and game['dealer_chips'] >= need2:
+        game['dealer_chips'] -= need2
+        game['dealer_bet'] += need2
+        game['pot'] += need2
+
+    phase = advance_phase(game)
+    if phase == 'showdown':
+        await poker_showdown(c)
+        return
+
+    text = poker_render(game) + f"\nХод: <b>Твой</b>"
+    await edit(c, text, poker_actions_kb())
+    await c.answer()
+
+
+@dp.callback_query(F.data == "poker_raise")
+async def poker_raise(c: CallbackQuery):
+    game = poker_games.get(c.from_user.id)
+    if not game or not game['active']:
+        await c.answer("Нет активной игры", show_alert=True)
+        return
+
+    raise_amt = max(game['last_raise'] * 2, 100)
+    need = game['dealer_bet'] + raise_amt - game['player_bet']
+
+    if game['player_chips'] < need:
+        await c.answer("❌ Недостаточно фишек!", show_alert=True)
+        return
+
+    game['player_chips'] -= need
+    game['player_bet'] += need
+    game['pot'] += need
+    game['last_raise'] = raise_amt
+
+    # Дилер отвечает
+    action = dealer_action(game)
+    if action == 'fold':
+        rake = int(game['pot'] * POKER_RAKE)
+        win = game['pot'] - rake
+        update_balance(c.from_user.id, win)
+        record_game(c.from_user.id, game['blind'], win)
+        game['active'] = False
+        text = (
+            f"🎉 <b>Дилер сбросил на рейз!</b>\n\n"
+            f"💰 Выигрыш: <b>+{fmt(win)}</b>\n"
+            f"💸 Рейк: <b>-{fmt(rake)}</b>"
+        )
+        await edit(c, text, back_menu())
+        await c.answer()
+        del poker_games[c.from_user.id]
+        return
+
+    need2 = game['player_bet'] - game['dealer_bet']
+    if need2 > 0 and game['dealer_chips'] >= need2:
+        game['dealer_chips'] -= need2
+        game['dealer_bet'] += need2
+        game['pot'] += need2
+
+    phase = advance_phase(game)
+    if phase == 'showdown':
+        await poker_showdown(c)
+        return
+
+    text = poker_render(game) + f"\nХод: <b>Твой</b>"
+    await edit(c, text, poker_actions_kb())
+    await c.answer()
+
+
+@dp.callback_query(F.data == "poker_fold")
+async def poker_fold(c: CallbackQuery):
+    game = poker_games.get(c.from_user.id)
+    if not game or not game['active']:
+        await c.answer("Нет активной игры", show_alert=True)
+        return
+    game['active'] = False
+    record_game(c.from_user.id, game['blind'], 0)
+    del poker_games[c.from_user.id]
+    u = get_user(c.from_user.id)
+    text = (
+        f"🚪 <b>Ты сбросил.</b>\n\n"
+        f"💸 Потеряно: <b>-{fmt(game['blind'])}</b>\n\n"
+        f"💼 Баланс: <b>{fmt(u['balance'])}</b>"
+    )
+    await edit(c, text, back_menu())
+    await c.answer()
+
+
+async def poker_showdown(c: CallbackQuery):
+    game = poker_games.get(c.from_user.id)
+    if not game:
+        return
+    player_best = best_hand(game['player'] + game['community'])
+    dealer_best = best_hand(game['dealer'] + game['community'])
+    cmp = compare(player_best, dealer_best)
+
+    community = " ".join(card_str(c) for c in game['community'])
+    dealer_cards = hand_str(game['dealer'])
+    my_cards = hand_str(game['player'])
+
+    if cmp > 0:
+        rake = int(game['pot'] * POKER_RAKE)
+        win = game['pot'] - rake
+        update_balance(c.from_user.id, win)
+        record_game(c.from_user.id, game['blind'], win)
+        result = f"🏆 <b>Ты победил!</b> +{fmt(win)}\n💸 Рейк: -{fmt(rake)}"
+    elif cmp < 0:
+        record_game(c.from_user.id, game['blind'], 0)
+        result = f"😢 <b>Дилер победил.</b> -{fmt(game['blind'])}"
+    else:
+        update_balance(c.from_user.id, game['blind'])
+        record_game(c.from_user.id, game['blind'], 0)
+        result = f"🤝 <b>Ничья.</b> Возврат {fmt(game['blind'])}"
+
+    game['active'] = False
+    u = get_user(c.from_user.id)
+    text = (
+        f"🃏 <b>ШОУДАУН</b>\n\n"
+        f"🤖 Дилер: {dealer_cards} — <b>{dealer_best[1]}</b>\n"
+        f"👤 Ты: {my_cards} — <b>{player_best[1]}</b>\n"
+        f"🎴 Общие: {community}\n\n"
+        f"{result}\n\n"
+        f"💼 Баланс: <b>{fmt(u['balance'])}</b>"
+    )
+    await edit(c, text, back_menu())
+    await c.answer()
+    del poker_games[c.from_user.id]
+    await notify_achievements(c.message, c.from_user.id)
+
+
+# ============================================================
+# 📊 ГРАФИК
+# ============================================================
+@dp.callback_query(F.data == "graph")
+async def cb_graph(c: CallbackQuery):
+    u = get_user(c.from_user.id)
+    # Пример истории — можно заменить на реальную из БД
+    # Здесь используем баланс + фейковые точки для демонстрации
+    history = [1000, 1200, 900, 1500, 800, u['balance']]
+    buf = make_balance_graph(history)
+    if buf is None:
+        await c.answer("❌ Pillow не установлен. Смотри requirements.txt", show_alert=True)
+        return
+
+    photo = BufferedInputFile(buf.read(), filename="graph.png")
+    await c.message.answer_photo(
+        photo,
+        caption=f"📊 <b>График баланса</b>\n\n💰 Текущий: <b>{fmt(u['balance'])}</b>",
+        parse_mode="HTML"
+    )
+    await c.answer()
+
+
+# ============================================================
+# 👥 ДУЭЛИ (PvP)
+# ============================================================
+@dp.callback_query(F.data == "duel")
+async def cb_duel(c: CallbackQuery):
+    u = get_user(c.from_user.id)
+    text = (
+        f"👥 <b>ДУЭЛИ PvP</b>\n\n"
+        f"💰 Баланс: <b>{fmt(u['balance'])}</b>\n\n"
+        f"Пригласи друга в дуэль! Победитель забирает банк.\n"
+        f"Рейк казино: 5%\n\n"
+        f"Выбери ставку:"
+    )
+    await edit(c, text, bet_menu("duel", u['balance']))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("bet_duel_"))
+async def duel_invite(c: CallbackQuery):
+    bet = int(c.data.split("_")[2])
+    u = get_user(c.from_user.id)
+    if u['balance'] < bet:
+        await c.answer("❌ Недостаточно!", show_alert=True)
+        return
+
+    # Кнопка приглашения — отправим в чат
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"⚔️ ПРИНЯТЬ ДУЭЛЬ ({fmt(bet)})",
+            callback_data=f"duel_accept_{c.from_user.id}_{bet}"
+        )],
+    ])
+    await c.message.answer(
+        f"⚔️ <b>{u['first_name'] or 'Игрок'}</b> вызывает на дуэль!\n\n"
+        f"💰 Ставка: <b>{fmt(bet)}</b>\n\n"
+        f"Кто примет вызов?",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("duel_accept_"))
+async def duel_accept(c: CallbackQuery):
+    parts = c.data.split("_")
+    challenger_id = int(parts[2])
+    bet = int(parts[3])
+
+    if c.from_user.id == challenger_id:
+        await c.answer("❌ Нельзя сражаться с собой!", show_alert=True)
+        return
+
+    challenger = get_user(challenger_id)
+    acceptor = get_user(c.from_user.id)
+
+    if challenger['balance'] < bet:
+        await c.answer("❌ У вызывающего недостаточно средств!", show_alert=True)
+        return
+    if acceptor['balance'] < bet:
+        await c.answer("❌ У тебя недостаточно средств!", show_alert=True)
+        return
+
+    # Списываем ставки
+    update_balance(challenger_id, -bet)
+    update_balance(c.from_user.id, -bet)
+
+    # Создаём дуэль
+    chat_id = c.message.chat.id
+    d = create_duel(chat_id, challenger_id, c.from_user.id, bet)
+
+    text = (
+        f"⚔️ <b>ДУЭЛЬ НАЧАЛАСЬ!</b>\n\n"
+        f"🥊 <b>{challenger['first_name']}</b> — HP: 100\n"
+        f"🥊 <b>{acceptor['first_name']}</b> — HP: 100\n\n"
+        f"💰 Банк: <b>{fmt(bet * 2)}</b>\n"
+        f"🎯 Ход: <b>{challenger['first_name']}</b>\n\n"
+        f"<i>Бой идёт по очереди. Бей или защищайся!</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚔️ АТАКА", callback_data="duel_attack"),
+         InlineKeyboardButton(text="🛡️ ЗАЩИТА", callback_data="duel_defend")],
+    ])
+    await c.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await c.answer()
+
+
+@dp.callback_query(F.data == "duel_attack")
+async def duel_attack_cb(c: CallbackQuery):
+    chat_id = c.message.chat.id
+    d = active_duels.get(chat_id)
+    if not d or not d['active']:
+        await c.answer("Нет активной дуэли", show_alert=True)
+        return
+    if d['turn'] != c.from_user.id:
+        await c.answer("⏳ Не твой ход!", show_alert=True)
+        return
+
+    result = duel_attack(chat_id, c.from_user.id)
+
+    if 'winner' in result:
+        winner = get_user(result['winner'])
+        loser = get_user(result['loser'])
+        pot = d['bet'] * 2
+        rake = int(pot * 0.05)
+        prize = pot - rake
+        update_balance(result['winner'], prize)
+        text = (
+            f"🏆 <b>ПОБЕДА!</b>\n\n"
+            f"👑 <b>{winner['first_name']}</b> выиграл!\n"
+            f"💰 Приз: <b>{fmt(prize)}</b>\n"
+            f"💸 Рейк: <b>-{fmt(rake)}</b>"
+        )
+        await c.message.answer(text, parse_mode="HTML")
+        del active_duels[chat_id]
+        return
+
+    p1 = get_user(d['p1'])
+    p2 = get_user(d['p2'])
+    next_id = result['next']
+    next_name = get_user(next_id)['first_name']
+
+    text = (
+        f"⚔️ <b>ДУЭЛЬ</b>\n\n"
+        f"🥊 {p1['first_name']} — HP: <b>{d['hp'][d['p1']]}</b>\n"
+        f"🥊 {p2['first_name']} — HP: <b>{d['hp'][d['p2']]}</b>\n\n"
+        f"💥 Урон: <b>{result['damage']}</b>\n"
+        f"🎯 Ход: <b>{next_name}</b>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚔️ АТАКА", callback_data="duel_attack"),
+         InlineKeyboardButton(text="🛡️ ЗАЩИТА", callback_data="duel_defend")],
+    ])
+    await c.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await c.answer()
+
+
+@dp.callback_query(F.data == "duel_defend")
+async def duel_defend_cb(c: CallbackQuery):
+    chat_id = c.message.chat.id
+    d = active_duels.get(chat_id)
+    if not d or not d['active']:
+        await c.answer("Нет активной дуэли", show_alert=True)
+        return
+    if d['turn'] != c.from_user.id:
+        await c.answer("⏳ Не твой ход!", show_alert=True)
+        return
+
+    result = duel_defend(chat_id, c.from_user.id)
+    p1 = get_user(d['p1'])
+    p2 = get_user(d['p2'])
+    next_id = result['next']
+    next_name = get_user(next_id)['first_name']
+
+    text = (
+        f"⚔️ <b>ДУЭЛЬ</b>\n\n"
+        f"🥊 {p1['first_name']} — HP: <b>{d['hp'][d['p1']]}</b>\n"
+        f"🥊 {p2['first_name']} — HP: <b>{d['hp'][d['p2']]}</b>\n\n"
+        f"🛡️ Защита! Урон: <b>{result['damage']}</b>\n"
+        f"🎯 Ход: <b>{next_name}</b>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚔️ АТАКА", callback_data="duel_attack"),
+         InlineKeyboardButton(text="🛡️ ЗАЩИТА", callback_data="duel_defend")],
+    ])
+    await c.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await c.answer()
+
+
+# ============================================================
 # ЗАПУСК
 # ============================================================
 async def main():
     init_db()
-    print("🎰 Бот запущен!")
+    print("🎰 CASINO ROYALE 5.0 запущен!")
+    print("✅ Анимации: слоты, рулетка, кости (Telegram Dice), монетка")
+    print("✅ Игры: слоты, рулетка, кости, монетка, блэкджек, мины, покер")
+    print("✅ Фичи: достижения, квесты, колесо, дуэли, промокоды, график")
     await dp.start_polling(bot)
 
 
